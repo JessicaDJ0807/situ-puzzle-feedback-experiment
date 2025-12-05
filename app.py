@@ -1,16 +1,16 @@
 # app.py
 
 import os
-from typing import List
+from typing import List, Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from groq import Groq
 
-# -------------------------
+# ---------------------------------------------------------
 # FastAPI app + CORS
-# -------------------------
+# ---------------------------------------------------------
 app = FastAPI()
 
 app.add_middleware(
@@ -21,19 +21,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -------------------------
+# ---------------------------------------------------------
 # Groq client
-# -------------------------
+# ---------------------------------------------------------
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY environment variable is not set")
 
 client = Groq(api_key=GROQ_API_KEY)
 
-# -------------------------
-# Common puzzle definitions
-# -------------------------
-
+# ---------------------------------------------------------
+# Common puzzle definitions + prompts
+# ---------------------------------------------------------
 COMMON_PUZZLES = """
 The 3 situational puzzles are:
 
@@ -67,44 +66,21 @@ Feedback timing rule (important):
   about the CURRENT puzzle are you allowed to include a feedback paragraph.
 """
 
-YESNO_RULE = """
-YES/NO question rule (critical):
-
-- First decide whether the participant's latest input IS a yes/no question.
-- If it CAN be answered with YES or NO, you must NOT say that it is not a yes/no question.
-  In that case, you must:
-  (a) answer YES or NO, and
-  (b) then provide the required feedback according to the experimental condition.
-
-- If it CANNOT be answered with YES or NO (for example: it is open-ended, contains multiple
-  questions at once, or is a statement asking for an explanation),
-  then you must NOT answer YES or NO at all.
-  In those cases, your entire reply must be exactly:
-
-  "The question you asked is not a YES or NO question."
-
-  with no additional text before or after.
-
-Decision chain (follow internally before every reply):
-
-1. Determine whether the user input is a YES/NO question.
-2. If YES → answer YES or NO, then generate feedback according to the condition.
-3. If NO → output ONLY "The question you asked is not a YES or NO question."
-4. Never output both a YES/NO answer AND that warning in the same reply.
-"""
-
 REASONING_PROTOCOL = """
 Reasoning protocol (very important):
 
-- Internally keep track of which puzzle is currently active (first puzzle, second puzzle, or third puzzle), based on what you have already told the participant.
+- Internally keep track of which puzzle is currently active (first puzzle, second puzzle, or third puzzle),
+  based on what you have already told the participant.
 - The ground-truth answers for each puzzle are fixed exactly as written above. You must NEVER contradict these answers.
 
 Puzzle-specific YES/NO constraints:
 
 - Puzzle 1 (dog + river):
   * The only correct explanation is that the river is frozen and the dog crosses on the ice.
-  * You may answer YES only if the participant's guess clearly refers to the river being frozen, ice, frozen water, or walking/standing on ice.
-  * If the participant suggests any other mechanism (for example: swimming, flying, jumping across, bridge, boat, shallow water, walking along the bank, etc.), you MUST answer NO.
+  * You may answer YES only if the participant's guess clearly refers to the river being frozen, ice, frozen water,
+    or walking/standing on ice.
+  * If the participant suggests any other mechanism (for example: swimming, flying, jumping across, bridge, boat,
+    shallow water, walking along the bank, etc.), you MUST answer NO.
 
 - Puzzle 2 (man in a plane):
   * The only correct explanation is that the man was in an airplane when he opened the door.
@@ -113,12 +89,14 @@ Puzzle-specific YES/NO constraints:
 
 - Puzzle 3 (dad + video games):
   * The only correct explanation is that the dad put the console on a high shelf or out of Jason's reach.
-  * You may answer YES only if the guess clearly refers to a shelf, putting the console high up, or placing it somewhere only the dad can reach.
+  * You may answer YES only if the guess clearly refers to a shelf, putting the console high up,
+    or placing it somewhere only the dad can reach.
   * Any other explanation (destroying the console, changing the password, locking it in a box, etc.) must be answered with NO.
 
 Concrete examples for Puzzle 1:
 - If the participant asks: "Is it because the river was frozen?" you MUST answer YES.
-- If the participant asks: "Is it because the dog was swimming?" you MUST answer NO, because swimming would obviously make the dog wet and contradicts the frozen-river solution.
+- If the participant asks: "Is it because the dog was swimming?" you MUST answer NO, because swimming would obviously make
+  the dog wet and contradicts the frozen-river solution.
 
 General YES/NO procedure:
 
@@ -127,7 +105,8 @@ General YES/NO procedure:
   2. For the current puzzle, compare that question or guess with the ground-truth answer and the constraints above.
   3. Decide whether the statement must be true, must be false, or cannot be determined from the puzzle.
   4. If it must be true, answer YES. If it must be false, answer NO.
-  5. If the question is ambiguous or mixes multiple ideas, choose the YES/NO that best matches the most literal and reasonable interpretation, and you may briefly clarify this in your explanation.
+  5. If the question is ambiguous or mixes multiple ideas, choose the YES/NO that best matches the most literal
+     and reasonable interpretation, and you may briefly clarify this in your explanation.
 
 - You must carry out all of this logical reasoning INTERNALLY and only output your final YES/NO and feedback text.
 - Do NOT describe your internal reasoning process step-by-step. Just give the concise external answer and feedback.
@@ -147,10 +126,6 @@ Put each paragraph on its own line and separate paragraphs with a blank line.
 Do not number the paragraphs (no "1.", "2.", or "3.").
 """
 
-# -------------------------
-# System prompts per condition
-# -------------------------
-
 SINCERE_PROMPT = f"""
 You are an AI assistant playing 3 rounds of a situational puzzle game with the participant.
 The participant is allowed to ask you only 10 questions per puzzle to guess the answer.
@@ -162,8 +137,7 @@ and move on to the next situational puzzle. After all 3 puzzles are completed, e
 
 Rules:
 - You must answer only YES or NO to the participant's questions, or explicitly confirm if their full guess is correct.
-
-{YESNO_RULE}
+- You never say that a question is not yes/no; that logic is handled outside the model.
 
 Feedback guidelines for the sincere condition:
 - Feedback must be contingent on the actual content of their question or guess.
@@ -190,8 +164,7 @@ and move on to the next situational puzzle. After all 3 puzzles are completed, e
 
 Rules:
 - You must answer only YES or NO to the participant's questions, or explicitly confirm if their full guess is correct.
-
-{YESNO_RULE}
+- You never say that a question is not yes/no; that logic is handled outside the model.
 
 Flattery feedback guidelines:
 - After each question or guess, follow up by randomly choosing ONE response from the list below and output it EXACTLY as written:
@@ -228,8 +201,7 @@ and move on to the next situational puzzle. After all 3 puzzles are completed, e
 
 Rules:
 - You must answer only YES or NO to the participant's questions, or explicitly confirm if their full guess is correct.
-
-{YESNO_RULE}
+- You never say that a question is not yes/no; that logic is handled outside the model.
 
 Neutral feedback guidelines:
 - After each question or guess, follow up with feedback that has neither positive nor negative valence.
@@ -253,11 +225,9 @@ SYSTEM_PROMPTS = {
     3: GENERIC_PROMPT,
 }
 
-# -------------------------
-# Pydantic models
-# -------------------------
-
-
+# ---------------------------------------------------------
+# Data models
+# ---------------------------------------------------------
 class ChatTurn(BaseModel):
     role: str   # "user" or "assistant"
     content: str
@@ -267,12 +237,55 @@ class ChatRequest(BaseModel):
     condition: int              # 1 = sincere, 2 = flattery, 3 = generic
     history: List[ChatTurn]     # full conversation so far, including latest user msg
 
+# ---------------------------------------------------------
+# Simple YES/NO question detector (code-side)
+# ---------------------------------------------------------
+def is_yes_no_question(text: str) -> bool:
+    """
+    Very simple heuristic:
+    - trim, lowercase, strip trailing '?'
+    - treat as yes/no if it starts with a common auxiliary verb
+      (is/are/was/were/do/does/did/can/could/will/would/should/etc.)
+    - treat one-word inputs or WH-questions (why/what/how/when/where/who/which)
+      as NOT yes/no
+    """
+    t = text.strip().lower()
+    if not t:
+        return False
 
-# -------------------------
+    # remove trailing question mark
+    if t.endswith("?"):
+        t = t[:-1].strip()
+
+    words = t.split()
+    if len(words) == 0:
+        return False
+
+    # single word like "swimming" or "why" is not a yes/no question
+    if len(words) == 1:
+        return False
+
+    first = words[0]
+
+    wh_words = {"why", "what", "how", "when", "where", "who", "which"}
+    if first in wh_words:
+        return False
+
+    auxiliaries = {
+        "is", "are", "was", "were", "am",
+        "do", "does", "did",
+        "can", "could",
+        "will", "would",
+        "shall", "should",
+        "has", "have", "had",
+        "may", "might", "must"
+    }
+
+    return first in auxiliaries
+
+# ---------------------------------------------------------
 # Groq helper
-# -------------------------
-
-
+# ---------------------------------------------------------
 def groq_chat(system_prompt: str, history: List[ChatTurn]) -> str:
     messages = [{"role": "system", "content": system_prompt}]
     for m in history:
@@ -282,19 +295,37 @@ def groq_chat(system_prompt: str, history: List[ChatTurn]) -> str:
         model="llama-3.1-8b-instant",
         messages=messages,
         max_tokens=400,
-        temperature=0.2,   # lower randomness
-        top_p=0.9,
+        temperature=0.0,   # fully deterministic
+        top_p=1.0,
     )
     return resp.choices[0].message.content.strip()
 
-
-# -------------------------
+# ---------------------------------------------------------
 # Routes
-# -------------------------
-
-
+# ---------------------------------------------------------
 @app.post("/chat")
 def chat(req: ChatRequest):
+    # Find the last user message in the history
+    last_user: Optional[ChatTurn] = None
+    for m in reversed(req.history):
+        if m.role == "user":
+            last_user = m
+            break
+
+    if last_user is None:
+        # fallback: no user message, just call the model
+        system_prompt = SYSTEM_PROMPTS.get(req.condition, SINCERE_PROMPT)
+        reply = groq_chat(system_prompt, req.history)
+        return {"reply": reply}
+
+    # Code-side YES/NO classification
+    if not is_yes_no_question(last_user.content):
+        # Non-yes/no → fixed message, NO model call
+        return {
+            "reply": "The question you asked is not a YES or NO question."
+        }
+
+    # Yes/no question → call Groq with appropriate system prompt
     system_prompt = SYSTEM_PROMPTS.get(req.condition, SINCERE_PROMPT)
     reply = groq_chat(system_prompt, req.history)
     return {"reply": reply}
