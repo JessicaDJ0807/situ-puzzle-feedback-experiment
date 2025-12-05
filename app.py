@@ -57,14 +57,15 @@ GENERIC_LIST = [
 def groq_chat(system_prompt: str, user_prompt: str) -> str:
     """Call Groq chat completion and return text."""
     resp = client.chat.completions.create(
-        model="mixtral-8x7b-32768",   # good, fast general model
+        model="llama-3.1-8b-instant",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        max_tokens=80,
+        max_tokens=120,
         temperature=0.7,
     )
+
     return resp.choices[0].message.content.strip()
 
 
