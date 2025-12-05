@@ -15,7 +15,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # you can later restrict this to your Cognition domain
+    allow_origins=["*"],  # later you can restrict to your Cognition domain
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -31,149 +31,216 @@ if not GROQ_API_KEY:
 client = Groq(api_key=GROQ_API_KEY)
 
 # ---------------------------------------------------------
-# Shared puzzle / rules text
+# Puzzles (only TWO riddles now)
 # ---------------------------------------------------------
-COMMON_PUZZLES = """
-The 3 situational puzzles are:
+PUZZLES = {
+    1: {
+        "name": "Puzzle 1",
+        "question": (
+            "A dog crosses the river without getting wet, and without using a bridge or boat. "
+            "How does it do this?"
+        ),
+        "ground_truth": (
+            "The river was frozen, and the dog walked across the frozen surface without getting wet."
+        ),
+        "puzzle_specific_rules": """
+In this puzzle, the ground truth is:
 
-1.
-Q: A dog crosses the river without getting wet, and without using a bridge or boat. How?
-A: The river was frozen.
+- The river was frozen.
+- The dog walked across the frozen river (on the ice) and therefore did not get wet.
 
-2.
-Q: A man opened a door, screamed, and was found dead a few minutes later, with no gunshots reported in the vicinity.
-What could have happened to him?
-A: The man was in a plane.
+YES/NO examples and constraints:
 
-3.
-Q: Jason’s dad couldn’t keep his son from playing video games. To keep Jason from playing video games all the time,
-the dad grabbed a hammer and solved the problem. Now he can play video games, but Jason cannot. What did the dad do?
-A: The dad built a shelf out of Jason’s reach and put the video game console up there. The dad can still reach it to play,
-but Jason cannot.
+- If the participant asks things like:
+  "Is the dog walking?",
+  "Is it walking across the river?",
+  "Did it walk over the river?",
+  these are compatible with the ground truth and you should answer YES.
+
+- If the participant asks:
+  "Is the river frozen?",
+  "Did it cross on ice?",
+  "Is there ice on the river?",
+  these are also compatible with the ground truth and you should answer YES.
+
+- If the participant suggests:
+  swimming, flying, jumping across, using a bridge, using a boat,
+  walking along the bank instead of crossing, shallow water, etc.,
+  these are incompatible with the ground truth and you must answer NO.
+"""
+    },
+    2: {
+        "name": "Puzzle 2",
+        "question": (
+            "A man opened a door, screamed, and was found dead a few minutes later, "
+            "with no gunshots reported in the vicinity. What could have happened to him?"
+        ),
+        "ground_truth": (
+            "The man was in an airplane when he opened the door, leading to his death."
+        ),
+        "puzzle_specific_rules": """
+In this puzzle, the ground truth is:
+
+- The man was in an airplane when he opened the door, which led to his death.
+
+YES/NO examples and constraints:
+
+- If the participant mentions:
+  "plane", "airplane", "being on a flight", "opening a door on a plane",
+  or anything clearly indicating he was in an aircraft,
+  these are compatible with the ground truth and you should answer YES.
+
+- If the participant suggests:
+  elevator, house, building, balcony, car, train, ship, or any context
+  other than an airplane, those are incompatible with the ground truth
+  and you must answer NO.
+"""
+    },
+}
+
+# ---------------------------------------------------------
+# Shared rules / formatting
+# ---------------------------------------------------------
+WARNING = "The question you asked is not a YES or NO question."
+
+
+def is_yes_no_question(text: str) -> bool:
+    """
+    Heuristic YES/NO detector for this experiment.
+
+    Treat as YES/NO if EITHER:
+    - It is a classic yes/no question (starts with an auxiliary and not with a WH-word), OR
+    - It looks like a guess statement that could be answered yes/no, e.g.,
+      "it is swimming", "the river was frozen", "i guess he swam", etc.
+    """
+
+    t = text.strip().lower()
+    if not t:
+        return False
+
+    # Remove trailing '?'
+    if t.endswith("?"):
+        t = t[:-1].strip()
+
+    words = t.split()
+    if len(words) == 0:
+        return False
+
+    first = words[0]
+
+    wh_words = {"why", "what", "how", "when", "where", "who", "which"}
+    if first in wh_words:
+        # "why is it crossing", "what happened", etc. → NOT yes/no
+        return False
+
+    auxiliaries = {
+        "is", "are", "was", "were", "am",
+        "do", "does", "did",
+        "can", "could",
+        "will", "would",
+        "shall", "should",
+        "has", "have", "had",
+        "may", "might", "must",
+    }
+
+    # 1) Classic yes/no question: starts with auxiliary
+    if first in auxiliaries:
+        return True
+
+    # 2) Guess-style statement: contains an auxiliary anywhere
+    if any(w in auxiliaries for w in words):
+        return True
+
+    # 3) Explicit guess phrases like "i guess", "my guess is", "i think"
+    guess_markers = {"guess", "think", "suppose"}
+    if any(w in guess_markers for w in words):
+        return True
+
+    return False
+
+
+def filter_warning_for_yesno(text: str) -> str:
+    """Strip the warning sentence if the model accidentally says it in yes/no mode."""
+    cleaned = text.replace(WARNING, "").strip()
+    while "\n\n\n" in cleaned:
+        cleaned = cleaned.replace("\n\n\n", "\n\n")
+    return cleaned
+
+
+def build_system_prompt(condition: int, puzzle_index: int) -> str:
+    """Build a system prompt for the given condition and the CURRENT puzzle only (1 or 2)."""
+    puzzle = PUZZLES.get(puzzle_index, PUZZLES[1])
+
+    base_intro = f"""
+You are an AI assistant playing a situational puzzle game with the participant.
+
+The overall experiment has exactly TWO puzzles in total, but in THIS conversation
+you are working ONLY on {puzzle["name"]}.
+
+Current puzzle:
+
+Q: {puzzle["question"]}
+
+Ground truth (you must NEVER contradict this):
+
+{puzzle["ground_truth"]}
+
+Use this ground truth to decide which participant guesses are compatible (YES)
+or incompatible (NO).
+
+{puzzle["puzzle_specific_rules"]}
+
+General rules:
+
+- You must answer only YES or NO to the participant's questions,
+  or explicitly confirm if their full guess is correct.
+- You never say that a question is not yes/no; that logic is handled outside the model.
+- The experiment logic enforces question limits. Do NOT mention how many questions
+  they have used or how many remain. Just answer YES/NO and give feedback.
 """
 
-FEEDBACK_TIMING_RULE = """
+    feedback_timing_rule = """
 Feedback timing rule (important):
 
-- When you first introduce the game and present a new puzzle (for example at the very start
-  of the experiment or immediately after revealing the answer to the previous puzzle),
-  you must NOT provide any feedback about the participant, because they have not asked
-  a question yet.
-- In those introduction turns, your reply should contain ONLY:
-  (a) the text of the current puzzle (or next puzzle), and
-  (b) at most a very brief neutral reminder that they can ask yes/no questions.
+- When you FIRST present this puzzle, you must NOT provide any feedback about the participant,
+  because they have not asked a question yet.
+- In that first introduction turn, your reply should contain ONLY the puzzle text (and at most
+  a very short neutral reminder that they can ask yes/no questions).
 - Only after the participant has asked at least one question or made at least one guess
-  about the CURRENT puzzle are you allowed to include a feedback paragraph.
+  for this puzzle are you allowed to include a feedback paragraph.
 """
 
-REASONING_PROTOCOL = """
-Reasoning protocol (very important):
-
-- Internally keep track of which puzzle is currently active (first puzzle, second puzzle, or third puzzle),
-  based on what you have already told the participant.
-- The ground-truth answers for each puzzle are fixed exactly as written above. You must NEVER contradict these answers.
-
-Puzzle-specific YES/NO constraints:
-
-- Puzzle 1 (dog + river):
-  * The only correct explanation is that the river is frozen and the dog crosses on the ice.
-  * You may answer YES only if the participant's guess clearly refers to the river being frozen, ice, frozen water,
-    or walking/standing on ice.
-  * If the participant suggests any other mechanism (for example: swimming, flying, jumping across, bridge, boat,
-    shallow water, walking along the bank, etc.), you MUST answer NO.
-
-- Puzzle 2 (man in a plane):
-  * The only correct explanation is that the man was in an airplane when he opened the door.
-  * You may answer YES only if the participant's guess clearly refers to a plane/airplane/aircraft/flight/being on a plane.
-  * Any other explanation (elevator, building, house, balcony, etc.) must be answered with NO.
-
-- Puzzle 3 (dad + video games):
-  * The only correct explanation is that the dad put the console on a high shelf or out of Jason's reach.
-  * You may answer YES only if the guess clearly refers to a shelf, putting the console high up,
-    or placing it somewhere only the dad can reach.
-  * Any other explanation (destroying the console, changing the password, locking it in a box, etc.) must be answered with NO.
-
-Concrete examples for Puzzle 1:
-- If the participant asks: "Is it because the river was frozen?" you MUST answer YES.
-- If the participant asks: "Is it because the dog was swimming?" you MUST answer NO, because swimming would obviously make
-  the dog wet and contradicts the frozen-river solution.
-
-General YES/NO procedure:
-
-- Before you answer YES or NO, silently do the following:
-  1. Identify the participant's latest question or guess as precisely as possible.
-  2. For the current puzzle, compare that question or guess with the ground-truth answer and the constraints above.
-  3. Decide whether the statement must be true, must be false, or cannot be determined from the puzzle.
-  4. If it must be true, answer YES. If it must be false, answer NO.
-  5. If the question is ambiguous or mixes multiple ideas, choose the YES/NO that best matches the most literal
-     and reasonable interpretation, and you may briefly clarify this in your explanation.
-
-- You must carry out all of this logical reasoning INTERNALLY and only output your final YES/NO and feedback text.
-- Do NOT describe your internal reasoning process step-by-step. Just give the concise external answer and feedback.
-"""
-
-FORMATTING_RULE = """
+    formatting_rule = """
 Formatting rule:
 
 Structure every reply into clear paragraphs, separated by blank lines:
 
-- First paragraph: Answer YES or NO (or explicitly confirm a correct full guess) and briefly connect it to the current puzzle.
+- First paragraph: Answer YES or NO (or explicitly confirm a correct full guess) and briefly connect it to the puzzle.
 - Second paragraph: Provide the feedback text (sincere praise, flattery, or neutral system feedback, depending on condition).
-- Third paragraph: If you are moving to the next puzzle, introduce the next puzzle and remind the participant they can ask
-  yes/no questions again. If you are not moving to the next puzzle yet, you may omit this paragraph.
+- If you are not ready to reveal the puzzle answer yet, do NOT mention that the puzzle is solved or finished.
 
 Put each paragraph on its own line and separate paragraphs with a blank line.
 Do not number the paragraphs (no "1.", "2.", or "3.").
 """
 
-# ---------------------------------------------------------
-# System prompts per condition
-# (Note: experiment logic controls question counts; model should NOT mention numbers.)
-# ---------------------------------------------------------
-SINCERE_PROMPT = f"""
-You are an AI assistant playing 3 rounds of a situational puzzle game with the participant.
-
-The overall experiment logic will enforce a limit of 10 questions per puzzle.
-You MUST NOT mention how many questions the participant has used or has remaining,
-and you MUST NOT say things like "You have X remaining questions" or
-"You've used up all 10 questions". Simply focus on answering yes/no and giving feedback.
-
-{COMMON_PUZZLES}
-
-Rules:
-- You must answer only YES or NO to the participant's questions, or explicitly confirm if their full guess is correct.
-- You never say that a question is not yes/no; that logic is handled outside the model.
-
+    if condition == 1:
+        # Sincere condition
+        feedback_rules = """
 Feedback guidelines for the sincere condition:
+
 - Feedback must be contingent on the actual content of their question or guess.
 - Specifically reference something they said (their logic, question type, or angle).
 - Contain mild, believable praise (no exaggerated flattery).
 - Avoid generic praise that could apply to anything; it must clearly depend on the user's question structure.
 - Keep the feedback to 2–3 sentences.
-
-{FEEDBACK_TIMING_RULE}
-
-{REASONING_PROTOCOL}
-
-{FORMATTING_RULE}
 """
-
-FLATTERY_PROMPT = f"""
-You are an AI assistant playing 3 rounds of a situational puzzle game with the participant.
-
-The overall experiment logic will enforce a limit of 10 questions per puzzle.
-You MUST NOT mention how many questions the participant has used or has remaining,
-and you MUST NOT say things like "You have X remaining questions" or
-"You've used up all 10 questions". Simply focus on answering yes/no and giving feedback.
-
-{COMMON_PUZZLES}
-
-Rules:
-- You must answer only YES or NO to the participant's questions, or explicitly confirm if their full guess is correct.
-- You never say that a question is not yes/no; that logic is handled outside the model.
-
+    elif condition == 2:
+        # Flattery
+        feedback_rules = """
 Flattery feedback guidelines:
-- After each question or guess, follow up by randomly choosing ONE response from the list below and output it EXACTLY as written:
+
+- After each question or guess, follow up by randomly choosing ONE response from the list below
+  and output it EXACTLY as written:
 [
 "That was an amazing attempt — you have a natural talent for this kind of puzzle!",
 "You're doing an incredible job! Your thinking is impressively sharp.",
@@ -188,29 +255,12 @@ Flattery feedback guidelines:
 ]
 - Do NOT incorporate the participant’s actual question or content into the flattery.
 - Keep the feedback part to 2–3 sentences.
-
-{FEEDBACK_TIMING_RULE}
-
-{REASONING_PROTOCOL}
-
-{FORMATTING_RULE}
 """
-
-GENERIC_PROMPT = f"""
-You are an AI assistant playing 3 rounds of a situational puzzle game with the participant.
-
-The overall experiment logic will enforce a limit of 10 questions per puzzle.
-You MUST NOT mention how many questions the participant has used or has remaining,
-and you MUST NOT say things like "You have X remaining questions" or
-"You've used up all 10 questions". Simply focus on answering yes/no and giving feedback.
-
-{COMMON_PUZZLES}
-
-Rules:
-- You must answer only YES or NO to the participant's questions, or explicitly confirm if their full guess is correct.
-- You never say that a question is not yes/no; that logic is handled outside the model.
-
+    else:
+        # Generic / neutral
+        feedback_rules = """
 Neutral feedback guidelines:
+
 - After each question or guess, follow up with feedback that has neither positive nor negative valence.
 - You are an AI system providing neutral, non-evaluative feedback.
 - Provide no praise or encouragement.
@@ -218,88 +268,12 @@ Neutral feedback guidelines:
 - Avoid emotionally positive or negative language.
 - Sound like a standard system-generated acknowledgment.
 - Keep it short: 1–2 sentences.
-
-{FEEDBACK_TIMING_RULE}
-
-{REASONING_PROTOCOL}
-
-{FORMATTING_RULE}
 """
 
-SYSTEM_PROMPTS = {
-    1: SINCERE_PROMPT,
-    2: FLATTERY_PROMPT,
-    3: GENERIC_PROMPT,
-}
-
-# ---------------------------------------------------------
-# Data models
-# ---------------------------------------------------------
-class ChatTurn(BaseModel):
-    role: str   # "user" or "assistant"
-    content: str
+    return base_intro + feedback_timing_rule + feedback_rules + formatting_rule
 
 
-class ChatRequest(BaseModel):
-    condition: int              # 1 = sincere, 2 = flattery, 3 = generic
-    history: List[ChatTurn]     # full conversation so far, including latest user msg
-
-
-# ---------------------------------------------------------
-# YES/NO detection + helpers
-# ---------------------------------------------------------
-WARNING = "The question you asked is not a YES or NO question."
-
-
-def is_yes_no_question(text: str) -> bool:
-    """
-    Very simple heuristic:
-    - lower case, strip trailing '?'
-    - treat as yes/no if it starts with a common auxiliary verb
-    - WH-questions (why/what/how/when/where/who/which) and one-word inputs are NOT yes/no
-    """
-    t = text.strip().lower()
-    if not t:
-        return False
-
-    if t.endswith("?"):
-        t = t[:-1].strip()
-
-    words = t.split()
-    if len(words) == 0:
-        return False
-
-    if len(words) == 1:
-        return False
-
-    first = words[0]
-
-    wh_words = {"why", "what", "how", "when", "where", "who", "which"}
-    if first in wh_words:
-        return False
-
-    auxiliaries = {
-        "is", "are", "was", "were", "am",
-        "do", "does", "did",
-        "can", "could",
-        "will", "would",
-        "shall", "should",
-        "has", "have", "had",
-        "may", "might", "must",
-    }
-
-    return first in auxiliaries
-
-
-def filter_warning_for_yesno(text: str) -> str:
-    """Strip the warning sentence if the model accidentally says it in yes/no mode."""
-    cleaned = text.replace(WARNING, "").strip()
-    while "\n\n\n" in cleaned:
-        cleaned = cleaned.replace("\n\n\n", "\n\n")
-    return cleaned
-
-
-def groq_chat(system_prompt: str, history: List[ChatTurn]) -> str:
+def groq_chat(system_prompt: str, history: List["ChatTurn"]) -> str:
     messages = [{"role": "system", "content": system_prompt}]
     for m in history:
         messages.append({"role": m.role, "content": m.content})
@@ -315,11 +289,30 @@ def groq_chat(system_prompt: str, history: List[ChatTurn]) -> str:
 
 
 # ---------------------------------------------------------
+# Data models
+# ---------------------------------------------------------
+class ChatTurn(BaseModel):
+    role: str   # "user" or "assistant"
+    content: str
+
+
+class ChatRequest(BaseModel):
+    condition: int              # 1 = sincere, 2 = flattery, 3 = generic
+    puzzle_index: int           # 1 or 2 (current riddle)
+    history: List[ChatTurn]     # full conversation so far, including latest user msg
+
+
+# ---------------------------------------------------------
 # Routes
 # ---------------------------------------------------------
 @app.post("/chat")
 def chat(req: ChatRequest):
-    system_prompt = SYSTEM_PROMPTS.get(req.condition, SINCERE_PROMPT)
+    # Clamp puzzle_index to 1 or 2
+    puzzle_index = req.puzzle_index
+    if puzzle_index not in (1, 2):
+        puzzle_index = 1
+
+    system_prompt = build_system_prompt(req.condition, puzzle_index)
 
     # Find the last user message
     last_user: Optional[ChatTurn] = None
@@ -329,15 +322,15 @@ def chat(req: ChatRequest):
             break
 
     # SPECIAL CASE: hidden setup prompt from frontend (startGame)
-    # This prompt asks the model to present only the first puzzle text.
+    # This prompt asks the model to present only the current puzzle text.
     if (
         last_user is not None
-        and "Present ONLY the text of the FIRST situational puzzle" in last_user.content
+        and "Present ONLY the text of the CURRENT situational puzzle" in last_user.content
     ):
         reply = groq_chat(system_prompt, req.history)
         return {"reply": reply}
 
-    # If no user message (unlikely in normal flow), just call the model as a fallback
+    # If no user message (unlikely), just call the model as a fallback
     if last_user is None:
         reply = groq_chat(system_prompt, req.history)
         return {"reply": reply}
