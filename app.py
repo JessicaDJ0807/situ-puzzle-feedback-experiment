@@ -15,7 +15,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # you can restrict this to your Cognition domain later
+    allow_origins=["*"],  # you can later restrict this to your Cognition domain
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -31,7 +31,7 @@ if not GROQ_API_KEY:
 client = Groq(api_key=GROQ_API_KEY)
 
 # ---------------------------------------------------------
-# Common puzzle definitions + prompts
+# Shared puzzle / rules text
 # ---------------------------------------------------------
 COMMON_PUZZLES = """
 The 3 situational puzzles are:
@@ -60,8 +60,8 @@ Feedback timing rule (important):
   you must NOT provide any feedback about the participant, because they have not asked
   a question yet.
 - In those introduction turns, your reply should contain ONLY:
-  (a) brief instructions/reminders about the game, and
-  (b) the text of the current puzzle (or next puzzle).
+  (a) the text of the current puzzle (or next puzzle), and
+  (b) at most a very brief neutral reminder that they can ask yes/no questions.
 - Only after the participant has asked at least one question or made at least one guess
   about the CURRENT puzzle are you allowed to include a feedback paragraph.
 """
@@ -119,19 +119,24 @@ Structure every reply into clear paragraphs, separated by blank lines:
 
 - First paragraph: Answer YES or NO (or explicitly confirm a correct full guess) and briefly connect it to the current puzzle.
 - Second paragraph: Provide the feedback text (sincere praise, flattery, or neutral system feedback, depending on condition).
-- Third paragraph: If you are moving to the next puzzle, introduce the next puzzle and remind the participant they have 10 new questions.
-  If you are not moving to the next puzzle yet, you may omit this paragraph.
+- Third paragraph: If you are moving to the next puzzle, introduce the next puzzle and remind the participant they can ask
+  yes/no questions again. If you are not moving to the next puzzle yet, you may omit this paragraph.
 
 Put each paragraph on its own line and separate paragraphs with a blank line.
 Do not number the paragraphs (no "1.", "2.", or "3.").
 """
 
+# ---------------------------------------------------------
+# System prompts per condition
+# (Note: experiment logic controls question counts; model should NOT mention numbers.)
+# ---------------------------------------------------------
 SINCERE_PROMPT = f"""
 You are an AI assistant playing 3 rounds of a situational puzzle game with the participant.
-The participant is allowed to ask you only 10 questions per puzzle to guess the answer.
-After the participant asks 10 questions for a puzzle, you must end the current game, reveal the answer,
-and move on to the next situational puzzle. After all 3 puzzles are completed, end the conversation by saying:
-"Thank you for participating in the experiment. Please fill out the questionnaire followed by the game session."
+
+The overall experiment logic will enforce a limit of 10 questions per puzzle.
+You MUST NOT mention how many questions the participant has used or has remaining,
+and you MUST NOT say things like "You have X remaining questions" or
+"You've used up all 10 questions". Simply focus on answering yes/no and giving feedback.
 
 {COMMON_PUZZLES}
 
@@ -155,10 +160,11 @@ Feedback guidelines for the sincere condition:
 
 FLATTERY_PROMPT = f"""
 You are an AI assistant playing 3 rounds of a situational puzzle game with the participant.
-The participant is allowed to ask you only 10 questions per puzzle to guess the answer.
-After the participant asks 10 questions for a puzzle, you must end the current game, reveal the answer,
-and move on to the next situational puzzle. After all 3 puzzles are completed, end the conversation by saying:
-"Thank you for participating in the experiment. Please fill out the questionnaire followed by the game session."
+
+The overall experiment logic will enforce a limit of 10 questions per puzzle.
+You MUST NOT mention how many questions the participant has used or has remaining,
+and you MUST NOT say things like "You have X remaining questions" or
+"You've used up all 10 questions". Simply focus on answering yes/no and giving feedback.
 
 {COMMON_PUZZLES}
 
@@ -192,10 +198,11 @@ Flattery feedback guidelines:
 
 GENERIC_PROMPT = f"""
 You are an AI assistant playing 3 rounds of a situational puzzle game with the participant.
-The participant is allowed to ask you only 10 questions per puzzle to guess the answer.
-After the participant asks 10 questions for a puzzle, you must end the current game, reveal the answer,
-and move on to the next situational puzzle. After all 3 puzzles are completed, end the conversation by saying:
-"Thank you for participating in the experiment. Please fill out the questionnaire followed by the game session."
+
+The overall experiment logic will enforce a limit of 10 questions per puzzle.
+You MUST NOT mention how many questions the participant has used or has remaining,
+and you MUST NOT say things like "You have X remaining questions" or
+"You've used up all 10 questions". Simply focus on answering yes/no and giving feedback.
 
 {COMMON_PUZZLES}
 
@@ -237,23 +244,24 @@ class ChatRequest(BaseModel):
     condition: int              # 1 = sincere, 2 = flattery, 3 = generic
     history: List[ChatTurn]     # full conversation so far, including latest user msg
 
+
 # ---------------------------------------------------------
-# Simple YES/NO question detector (code-side)
+# YES/NO detection + helpers
 # ---------------------------------------------------------
+WARNING = "The question you asked is not a YES or NO question."
+
+
 def is_yes_no_question(text: str) -> bool:
     """
     Very simple heuristic:
-    - trim, lowercase, strip trailing '?'
+    - lower case, strip trailing '?'
     - treat as yes/no if it starts with a common auxiliary verb
-      (is/are/was/were/do/does/did/can/could/will/would/should/etc.)
-    - treat one-word inputs or WH-questions (why/what/how/when/where/who/which)
-      as NOT yes/no
+    - WH-questions (why/what/how/when/where/who/which) and one-word inputs are NOT yes/no
     """
     t = text.strip().lower()
     if not t:
         return False
 
-    # remove trailing question mark
     if t.endswith("?"):
         t = t[:-1].strip()
 
@@ -261,7 +269,6 @@ def is_yes_no_question(text: str) -> bool:
     if len(words) == 0:
         return False
 
-    # single word like "swimming" or "why" is not a yes/no question
     if len(words) == 1:
         return False
 
@@ -278,14 +285,20 @@ def is_yes_no_question(text: str) -> bool:
         "will", "would",
         "shall", "should",
         "has", "have", "had",
-        "may", "might", "must"
+        "may", "might", "must",
     }
 
     return first in auxiliaries
 
-# ---------------------------------------------------------
-# Groq helper
-# ---------------------------------------------------------
+
+def filter_warning_for_yesno(text: str) -> str:
+    """Strip the warning sentence if the model accidentally says it in yes/no mode."""
+    cleaned = text.replace(WARNING, "").strip()
+    while "\n\n\n" in cleaned:
+        cleaned = cleaned.replace("\n\n\n", "\n\n")
+    return cleaned
+
+
 def groq_chat(system_prompt: str, history: List[ChatTurn]) -> str:
     messages = [{"role": "system", "content": system_prompt}]
     for m in history:
@@ -295,39 +308,48 @@ def groq_chat(system_prompt: str, history: List[ChatTurn]) -> str:
         model="llama-3.1-8b-instant",
         messages=messages,
         max_tokens=400,
-        temperature=0.0,   # fully deterministic
+        temperature=0.0,  # deterministic
         top_p=1.0,
     )
     return resp.choices[0].message.content.strip()
+
 
 # ---------------------------------------------------------
 # Routes
 # ---------------------------------------------------------
 @app.post("/chat")
 def chat(req: ChatRequest):
-    # Find the last user message in the history
+    system_prompt = SYSTEM_PROMPTS.get(req.condition, SINCERE_PROMPT)
+
+    # Find the last user message
     last_user: Optional[ChatTurn] = None
     for m in reversed(req.history):
         if m.role == "user":
             last_user = m
             break
 
-    if last_user is None:
-        # fallback: no user message, just call the model
-        system_prompt = SYSTEM_PROMPTS.get(req.condition, SINCERE_PROMPT)
+    # SPECIAL CASE: hidden setup prompt from frontend (startGame)
+    # This prompt asks the model to present only the first puzzle text.
+    if (
+        last_user is not None
+        and "Present ONLY the text of the FIRST situational puzzle" in last_user.content
+    ):
         reply = groq_chat(system_prompt, req.history)
         return {"reply": reply}
 
-    # Code-side YES/NO classification
-    if not is_yes_no_question(last_user.content):
-        # Non-yes/no → fixed message, NO model call
-        return {
-            "reply": "The question you asked is not a YES or NO question."
-        }
+    # If no user message (unlikely in normal flow), just call the model as a fallback
+    if last_user is None:
+        reply = groq_chat(system_prompt, req.history)
+        return {"reply": reply}
 
-    # Yes/no question → call Groq with appropriate system prompt
-    system_prompt = SYSTEM_PROMPTS.get(req.condition, SINCERE_PROMPT)
+    # Normal flow: participant's real messages
+    # 1) Non yes/no → fixed warning, no model call
+    if not is_yes_no_question(last_user.content):
+        return {"reply": WARNING}
+
+    # 2) Yes/no → call Groq and strip accidental warning
     reply = groq_chat(system_prompt, req.history)
+    reply = filter_warning_for_yesno(reply)
     return {"reply": reply}
 
 
