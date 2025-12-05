@@ -15,7 +15,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # you can restrict to your cognition.run domain later
+    allow_origins=["*"],  # you can restrict this to your Cognition domain later
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -65,6 +65,32 @@ Feedback timing rule (important):
   (b) the text of the current puzzle (or next puzzle).
 - Only after the participant has asked at least one question or made at least one guess
   about the CURRENT puzzle are you allowed to include a feedback paragraph.
+"""
+
+YESNO_RULE = """
+YES/NO question rule (critical):
+
+- First decide whether the participant's latest input IS a yes/no question.
+- If it CAN be answered with YES or NO, you must NOT say that it is not a yes/no question.
+  In that case, you must:
+  (a) answer YES or NO, and
+  (b) then provide the required feedback according to the experimental condition.
+
+- If it CANNOT be answered with YES or NO (for example: it is open-ended, contains multiple
+  questions at once, or is a statement asking for an explanation),
+  then you must NOT answer YES or NO at all.
+  In those cases, your entire reply must be exactly:
+
+  "The question you asked is not a YES or NO question."
+
+  with no additional text before or after.
+
+Decision chain (follow internally before every reply):
+
+1. Determine whether the user input is a YES/NO question.
+2. If YES → answer YES or NO, then generate feedback according to the condition.
+3. If NO → output ONLY "The question you asked is not a YES or NO question."
+4. Never output both a YES/NO answer AND that warning in the same reply.
 """
 
 REASONING_PROTOCOL = """
@@ -122,7 +148,7 @@ Do not number the paragraphs (no "1.", "2.", or "3.").
 """
 
 # -------------------------
-# Full system prompts per condition
+# System prompts per condition
 # -------------------------
 
 SINCERE_PROMPT = f"""
@@ -136,9 +162,8 @@ and move on to the next situational puzzle. After all 3 puzzles are completed, e
 
 Rules:
 - You must answer only YES or NO to the participant's questions, or explicitly confirm if their full guess is correct.
-- If the participant asks something that cannot be answered YES or NO, respond with:
-  "The question you asked is not a YES or NO question."
-- After each question or guess, you must follow up with feedback on the participant's approach.
+
+{YESNO_RULE}
 
 Feedback guidelines for the sincere condition:
 - Feedback must be contingent on the actual content of their question or guess.
@@ -165,8 +190,8 @@ and move on to the next situational puzzle. After all 3 puzzles are completed, e
 
 Rules:
 - You must answer only YES or NO to the participant's questions, or explicitly confirm if their full guess is correct.
-- If the participant asks something that cannot be answered YES or NO, respond with:
-  "The question you asked is not a YES or NO question."
+
+{YESNO_RULE}
 
 Flattery feedback guidelines:
 - After each question or guess, follow up by randomly choosing ONE response from the list below and output it EXACTLY as written:
@@ -203,8 +228,8 @@ and move on to the next situational puzzle. After all 3 puzzles are completed, e
 
 Rules:
 - You must answer only YES or NO to the participant's questions, or explicitly confirm if their full guess is correct.
-- If the participant asks something that cannot be answered YES or NO, respond with:
-  "The question you asked is not a YES or NO question."
+
+{YESNO_RULE}
 
 Neutral feedback guidelines:
 - After each question or guess, follow up with feedback that has neither positive nor negative valence.
@@ -234,13 +259,13 @@ SYSTEM_PROMPTS = {
 
 
 class ChatTurn(BaseModel):
-  role: str   # "user" or "assistant"
-  content: str
+    role: str   # "user" or "assistant"
+    content: str
 
 
 class ChatRequest(BaseModel):
-  condition: int              # 1 = sincere, 2 = flattery, 3 = generic
-  history: List[ChatTurn]     # full conversation so far, including latest user msg
+    condition: int              # 1 = sincere, 2 = flattery, 3 = generic
+    history: List[ChatTurn]     # full conversation so far, including latest user msg
 
 
 # -------------------------
@@ -249,17 +274,18 @@ class ChatRequest(BaseModel):
 
 
 def groq_chat(system_prompt: str, history: List[ChatTurn]) -> str:
-  messages = [{"role": "system", "content": system_prompt}]
-  for m in history:
-    messages.append({"role": m.role, "content": m.content})
+    messages = [{"role": "system", "content": system_prompt}]
+    for m in history:
+        messages.append({"role": m.role, "content": m.content})
 
-  resp = client.chat.completions.create(
-      model="llama-3.1-8b-instant",
-      messages=messages,
-      max_tokens=400,
-      temperature=0.0,  # deterministic, less "creative"
-  )
-  return resp.choices[0].message.content.strip()
+    resp = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=messages,
+        max_tokens=400,
+        temperature=0.2,   # lower randomness
+        top_p=0.9,
+    )
+    return resp.choices[0].message.content.strip()
 
 
 # -------------------------
@@ -269,11 +295,11 @@ def groq_chat(system_prompt: str, history: List[ChatTurn]) -> str:
 
 @app.post("/chat")
 def chat(req: ChatRequest):
-  system_prompt = SYSTEM_PROMPTS.get(req.condition, SINCERE_PROMPT)
-  reply = groq_chat(system_prompt, req.history)
-  return {"reply": reply}
+    system_prompt = SYSTEM_PROMPTS.get(req.condition, SINCERE_PROMPT)
+    reply = groq_chat(system_prompt, req.history)
+    return {"reply": reply}
 
 
 @app.get("/")
 def root():
-  return {"status": "ok", "message": "situ puzzle game backend (Groq) running"}
+    return {"status": "ok", "message": "situ puzzle game backend (Groq) running"}
